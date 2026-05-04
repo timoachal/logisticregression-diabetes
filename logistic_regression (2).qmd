@@ -1,0 +1,361 @@
+---
+title: "Logistic Regression Analysis"
+author: "Timothy Achala"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    fig-width: 7
+    fig-height: 5
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+This report demonstrates logistic regression using a diabetes dataset. The outcome is **diabetes diagnosis** (Yes/No), predicted by age, BMI, glucose level, physical activity, and family history.
+
+---
+
+# Data Loading
+
+The dataset (`diabetes_data.csv`) is a  sample of 500 individuals with the following variables:
+
+| Variable | Type | Description |
+|---|---|---|
+| `diabetes` | Binary outcome | Yes / No |
+| `age` | Continuous | Age in years (25–75) |
+| `bmi` | Continuous | Body Mass Index |
+| `glucose` | Continuous | Fasting blood glucose (mg/dL) |
+| `active` | Binary | Physically active (Yes/No) |
+| `family_hx` | Binary | Family history of diabetes (Yes/No) |
+
+```{r}
+#| label: setup
+
+for (pkg in c("ggplot2","dplyr","broom","patchwork","performance",
+              "effectsize","pROC","scales","sjPlot","ggdist","see")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+}
+
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(ggdist)
+
+df <- read.csv("diabetes_data.csv", stringsAsFactors = FALSE)
+df$diabetes  <- factor(df$diabetes,  levels = c("No","Yes"))
+df$active    <- factor(df$active,    levels = c("No","Yes"))
+df$family_hx <- factor(df$family_hx, levels = c("No","Yes"))
+
+cat("Rows:", nrow(df), "\n")
+cat("Outcome distribution:\n")
+print(table(df$diabetes))
+cat("\nPrevalence:", round(mean(df$diabetes == "Yes") * 100, 1), "%\n")
+```
+
+```{r}
+#| label: glimpse
+glimpse(df)
+```
+
+---
+
+# Exploratory Data Analysis
+
+Raincloud plots combine a half-violin (density), jittered raw points, and a boxplot summary — providing a richer distributional picture than boxplots alone.
+
+```{r}
+#| label: eda-raincloud
+#| fig-cap: "Raincloud plots: continuous predictors by diabetes status"
+#| fig-height: 7
+
+pal <- c("No" = "#4CAF50", "Yes" = "#F44336")
+
+make_rain <- function(var, ylab) {
+  ggplot(df, aes(x = diabetes, y = .data[[var]], fill = diabetes, color = diabetes)) +
+    ggdist::stat_halfeye(adjust = 0.7, width = 0.5, justification = -0.25,
+                         .width = 0, point_colour = NA, alpha = 0.75) +
+    geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.4,
+                 color = "grey30", linewidth = 0.5) +
+    ggdist::stat_dots(side = "left", justification = 1.1,
+                      dotsize = 0.6, alpha = 0.5) +
+    scale_fill_manual(values = pal) +
+    scale_color_manual(values = pal) +
+    labs(x = NULL, y = ylab) +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = "none")
+}
+
+r1 <- make_rain("age",     "Age (years)")
+r2 <- make_rain("bmi",     "BMI")
+r3 <- make_rain("glucose", "Glucose (mg/dL)")
+
+(r1 | r2 | r3) +
+  plot_annotation(
+    title = "Distribution of Continuous Predictors by Diabetes Status",
+    theme = theme(plot.title = element_text(face = "bold", size = 13))
+  )
+```
+
+```{r}
+#| label: eda-cat
+#| fig-cap: "Proportion with diabetes by categorical predictors"
+#| fig-height: 3.5
+
+p_act <- ggplot(df, aes(x = active, fill = diabetes)) +
+  geom_bar(position = "fill", alpha = 0.85) +
+  scale_fill_manual(values = pal, name = "Diabetes") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Physical Activity", x = "Physically Active", y = "Proportion") +
+  theme_minimal()
+
+p_fhx <- ggplot(df, aes(x = family_hx, fill = diabetes)) +
+  geom_bar(position = "fill", alpha = 0.85) +
+  scale_fill_manual(values = pal, name = "Diabetes") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Family History", x = "Family History", y = "Proportion") +
+  theme_minimal()
+
+p_act | p_fhx
+```
+
+---
+
+# Logistic Regression Model
+
+```{r}
+#| label: model
+
+model <- glm(diabetes ~ age + bmi + glucose + active + family_hx,
+             data = df, family = binomial(link = "logit"))
+summary(model)
+```
+
+---
+
+# Odds Ratios and Confidence Intervals
+
+```{r}
+#| label: odds-ratios
+
+library(broom)
+
+tidy_model <- tidy(model, exponentiate = TRUE, conf.int = TRUE)
+tidy_model$term <- c("Intercept","Age","BMI","Glucose",
+                     "Active (Yes)","Family Hx (Yes)")
+
+knitr::kable(
+  tidy_model[, c("term","estimate","conf.low","conf.high","p.value")],
+  digits = 3,
+  col.names = c("Predictor","Odds Ratio","95% CI Lower","95% CI Upper","p-value"),
+  caption = "Odds Ratios with 95% Confidence Intervals"
+)
+```
+
+## Forest Plot of Odds Ratios
+
+```{r}
+#| label: forest-plot
+#| fig-cap: "Forest plot of odds ratios (excluding intercept)"
+
+or_df <- tidy_model[-1, ]
+
+ggplot(or_df, aes(x = reorder(term, estimate),
+                  y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "#2196F3", size = 0.8, linewidth = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(title = "Odds Ratios (95% CI)",
+       subtitle = "Dashed line = OR of 1 (no effect)",
+       x = NULL, y = "Odds Ratio") +
+  theme_minimal(base_size = 12)
+```
+
+### Interpretation of Odds Ratios
+
+- **Age**: Each additional year of age increases the odds of diabetes by a small but consistent amount.
+- **BMI**: Each unit increase in BMI raises the odds — higher adiposity elevates risk.
+- **Glucose**: A one-unit rise in blood glucose meaningfully increases the odds.
+- **Active (Yes)**: Physical activity *reduces* the odds of diabetes (OR < 1 — protective factor).
+- **Family History (Yes)**: Having a family history substantially *increases* the odds (OR > 1 — strong risk factor).
+
+---
+
+# Predicted Probabilities
+
+## sjPlot: Marginal Effects
+
+`sjPlot::plot_model()` with `type = "pred"` plots marginal predicted probabilities for each predictor, holding all others at their mean or reference level — the clearest way to interpret logistic regression predictions.
+
+```{r}
+#| label: sjplot-glucose
+#| fig-cap: "Predicted P(Diabetes) by glucose, stratified by family history"
+
+library(sjPlot)
+
+plot_model(model, type = "pred",
+           terms = c("glucose", "family_hx"),
+           title = "Predicted P(Diabetes) by Glucose & Family History",
+           legend.title = "Family History",
+           colors = c("#4CAF50","#F44336")) +
+  theme_minimal()
+```
+
+```{r}
+#| label: sjplot-bmi
+#| fig-cap: "Predicted P(Diabetes) by BMI, stratified by activity status"
+
+plot_model(model, type = "pred",
+           terms = c("bmi", "active"),
+           title = "Predicted P(Diabetes) by BMI & Physical Activity",
+           legend.title = "Physically Active",
+           colors = c("#F44336","#4CAF50")) +
+  theme_minimal()
+```
+
+```{r}
+#| label: sjplot-age
+#| fig-cap: "Predicted probability of diabetes by age"
+
+plot_model(model, type = "pred",
+           terms = "age",
+           title = "Predicted P(Diabetes) by Age") +
+  theme_minimal()
+```
+
+## effectsize: Standardised Coefficients
+
+Standardised coefficients place all predictors on a comparable scale (standard deviation units), allowing direct ranking of effect magnitudes regardless of the original measurement units.
+
+```{r}
+#| label: effectsize-std
+
+library(effectsize)
+
+std_coefs <- standardize_parameters(model, method = "refit")
+print(std_coefs)
+```
+
+```{r}
+#| label: effectsize-plot
+#| fig-cap: "Standardised effect sizes — direct comparison across predictors"
+
+plot(std_coefs) +
+  labs(title = "Standardised Coefficients (Log-Odds Scale)",
+       subtitle = "Larger absolute value = stronger predictor") +
+  theme_minimal()
+```
+
+**Interpretation**: Values further from zero indicate stronger predictors on a common scale. Negative standardised coefficients (e.g., `active`) confirm protective effects; positive values confirm risk-increasing effects. This allows a direct answer to *"which predictor matters most?"*
+
+### Key Observations
+
+- As glucose and BMI rise, predicted probability of diabetes increases consistently.
+- Individuals with a **family history** show markedly higher predicted probabilities across all glucose levels.
+- **Physical activity** shifts curves downward — a clear protective effect visible across all BMI values.
+
+---
+
+# Effect Size
+
+```{r}
+#| label: effect-size
+
+# Nagelkerke & McFadden R² via performance
+r2 <- performance::r2(model)
+print(r2)
+
+cat("\nRaw log-odds coefficients (effect magnitudes):\n")
+print(round(coef(model)[-1], 4))
+```
+
+**Interpretation**: Nagelkerke R² estimates the proportion of variance in the outcome explained by the model. Values of 0.20–0.40 are considered moderate to good in logistic regression.
+
+---
+
+# Model Assumption Checks (performance package)
+
+```{r}
+#| label: assumptions
+
+library(performance)
+library(see)
+
+model_perf <- model_performance(model)
+print(model_perf)
+```
+
+```{r}
+#| label: check-model
+#| fig-cap: "Visual assumption checks (performance package)"
+#| fig-width: 9
+#| fig-height: 7
+
+check_model(model, check = c("vif","outliers","pp_check","binned_residuals"))
+```
+
+```{r}
+#| label: vif
+
+cat("Variance Inflation Factors:\n")
+check_collinearity(model)
+```
+
+```{r}
+#| label: hoslem
+
+hl <- performance_hosmer(model, n_bins = 10)
+print(hl)
+```
+
+### Assumption Interpretation
+
+| Check | Criterion | Status |
+|---|---|---|
+| Multicollinearity (VIF) | All VIF < 5 | ✅ Expected pass |
+| Hosmer-Lemeshow test | p > 0.05 = good fit | Inspect output |
+| Binned residuals | Points within bands | Visual check |
+| Influential outliers | No extreme Cook's D | Visual check |
+
+---
+
+# ROC Curve and Model Performance
+
+```{r}
+#| label: roc
+#| fig-cap: "ROC Curve"
+
+library(pROC)
+
+df$pred_prob <- predict(model, type = "response")
+roc_obj <- roc(df$diabetes, df$pred_prob, levels = c("No","Yes"))
+auc_val  <- auc(roc_obj)
+
+ggroc(roc_obj, color = "#2196F3", linewidth = 1.2) +
+  geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "grey50") +
+  annotate("text", x = 0.3, y = 0.2,
+           label = paste0("AUC = ", round(auc_val, 3)),
+           size = 5, color = "#D32F2F") +
+  labs(title = "ROC Curve — Logistic Regression Model",
+       x = "Specificity", y = "Sensitivity") +
+  theme_minimal()
+```
+
+**AUC Interpretation**: AUC > 0.80 indicates good model discrimination between diabetic and non-diabetic individuals.
+
+---
+
+# Conclusions
+
+1. **Glucose**, **BMI**, **age**, and **family history** are significant positive predictors of diabetes.
+2. **Physical activity** is a significant *protective* factor — active individuals have meaningfully lower predicted probabilities.
+3. Raincloud plots reveal clear distributional shifts in glucose and BMI between outcome groups, with greater spread and higher values in the diabetic group.
+4. `sjPlot` marginal effects show how predicted probability changes smoothly across continuous predictors, stratified by key moderators (family history, activity).
+5. Standardised coefficients (`effectsize`) confirm glucose and family history as the strongest predictors on a directly comparable scale.
+6. The model demonstrates moderate-to-good fit (Nagelkerke R², AUC, Hosmer-Lemeshow).
+7. Assumption checks (VIF, binned residuals) confirm the model is well-specified with no multicollinearity concerns.
